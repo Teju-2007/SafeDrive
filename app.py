@@ -23,6 +23,8 @@ def number(v): return v.replace(" ","").upper()
 def me(): return st.session_state.user
 def person(): return one("SELECT * FROM users WHERE phone=?",(me(),))
 def title(a,b): st.title(a); st.caption(b)
+def context_bar(page):
+    st.caption(f"SafeDrive / {page}")
 
 def init_db():
     with conn() as c:
@@ -60,7 +62,10 @@ def login():
     if st.session_state.step=="otp":
         left=max(0,int(st.session_state.expires-time.time())); cooldown=max(0,int(st.session_state.resend-time.time())); locked=st.session_state.attempts>=MAX_ATTEMPTS
         title("Verify your mobile number",f"OTP sent to +91 ••••••{st.session_state.pending[-4:]}")
-        st.info(f"Demo OTP: {OTP} · Valid for {left//60}:{left%60:02d}. Production uses a unique SMS OTP.")
+        st.caption(f"OTP is valid for {left//60}:{left%60:02d}.")
+        with st.expander("Hackathon demo shortcut"):
+            st.code(f"Demo OTP: {OTP}", language=None)
+            st.caption("This shortcut exists only for the prototype. Production uses a unique OTP sent through an approved SMS provider.")
         if locked: st.error("Too many incorrect attempts. Resend an OTP to start a new challenge.")
         code=st.text_input("Enter the 6-digit OTP",max_chars=6,type="password")
         a,b=st.columns(2)
@@ -73,7 +78,10 @@ def login():
                     st.error("Too many incorrect attempts. Resend an OTP." if remaining<=0 else f"Incorrect OTP. {remaining} attempt(s) remaining.")
         with b:
             if st.button("Resend OTP",use_container_width=True,disabled=cooldown>0): start_otp(st.session_state.pending); st.rerun()
-        if cooldown: st.caption(f"You can resend in {cooldown} seconds.")
+        if cooldown:
+            st.caption(f"You can resend in {cooldown} seconds.")
+            if st.button("Refresh OTP timer"):
+                st.rerun()
         if st.button("Use a different mobile number"): st.session_state.step,st.session_state.pending="choose",None; st.rerun()
         return
     a,b=st.tabs(["Log in","Create account"])
@@ -95,15 +103,19 @@ def login():
 
 def dashboard():
     p,used=me(),quota(me()); docs=one("SELECT COUNT(*) n FROM docs WHERE phone=?",(p,))["n"]; open_tickets=one("SELECT COUNT(*) n FROM tickets WHERE phone=? AND status!='Resolved'",(p,))["n"]; trusted=one("SELECT trusted FROM state WHERE phone=?",(p,))["trusted"]
+    context_bar("Dashboard")
     st.markdown('<div class="hero"><h1>Your documents. Always within reach.</h1><p>Transparent sync, recovery, and safe official-service handoffs.</p></div>',unsafe_allow_html=True)
     for col,label,value,pill in zip(st.columns(4),["Protected documents","Searches remaining today","Secure session","Open support requests"],[docs,f"{LIMIT-used} / {LIMIT}","Verified" if trusted else "Verification needed",open_tickets],["Account isolated","Resets daily","Privacy first","Live tracking"]):
         with col: st.markdown(f'<div class="card">{label}<div class="metric">{value}</div><span class="pill">{pill}</span></div>',unsafe_allow_html=True)
-    for col,label,page in zip(st.columns(4),["Restore a missing document","Search a vehicle","Get help","Official service hub"],["Recover documents","Vehicle search","Support centre","Service hub"]):
+    if not trusted:
+        if st.button("Verify now", type="primary"):
+            st.session_state.page="Secure access"; st.rerun()
+    for col,label,page in zip(st.columns(5),["Document vault","Vehicle search","Challan check","Support centre","Service hub"],["Document vault","Vehicle search","Challan check","Support centre","Service hub"]):
         with col:
             if st.button(label,use_container_width=True): st.session_state.page=page;st.rerun()
 
 def vault():
-    p=me(); title("Document vault","Account-scoped virtual RC/DL passes. They are not replacements for official documents.")
+    p=me(); context_bar("Document vault"); title("Document vault","Account-scoped virtual RC/DL passes. They are not replacements for official documents.")
     rows=all_rows("SELECT * FROM docs WHERE phone=? ORDER BY id DESC",(p,))
     if not rows: st.info("No documents saved yet. Add a demo document or use the official Service hub.")
     for d in rows:
@@ -121,7 +133,7 @@ def vault():
             else: run("INSERT INTO docs(phone,kind,num,status,updated) VALUES(?,?,?,?,?)",(p,kind,num,"Synced","Just now"));st.success("Demo document added.");st.rerun()
 
 def recovery():
-    p=me();count=one("SELECT COUNT(*) n FROM docs WHERE phone=?",(p,))["n"];title("Recover documents","Recover only this account’s local demo vault; SafeDrive never silently overwrites records.")
+    p=me();count=one("SELECT COUNT(*) n FROM docs WHERE phone=?",(p,))["n"];context_bar("Recover documents");title("Recover documents","Recover only this account’s local demo vault; SafeDrive never silently overwrites records.")
     source=st.radio("Where should we look first?",["My secure device backup","Verify against official record","I need guided support"],horizontal=True);allowed=st.checkbox("I confirm that I am authorised to access these records")
     if st.button("Start recovery",type="primary"):
         if not allowed: st.error("Confirm authorisation before recovery.")
@@ -132,7 +144,7 @@ def recovery():
     st.dataframe([{"Action":"Account-scoped backup check","Result":f"{count} document(s) available"}],hide_index=True,use_container_width=True)
 
 def search():
-    p,used=me(),quota(me());remaining=LIMIT-used;title("Vehicle search","A transparent quota that resets automatically each calendar day.");st.progress(used/LIMIT,text=f"{remaining} of {LIMIT} standard searches remain today")
+    p,used=me(),quota(me());remaining=LIMIT-used;context_bar("Vehicle search");title("Vehicle search","A transparent quota that resets automatically each calendar day.");st.progress(used/LIMIT,text=f"{remaining} of {LIMIT} standard searches remain today")
     vehicle=number(st.text_input("Vehicle registration number",placeholder="e.g. DL01AB1234"))
     if st.button("Search vehicle",type="primary"):
         if not re.fullmatch(r"[A-Z0-9-]{6,15}",vehicle): st.error("Enter a valid vehicle registration number.")
@@ -144,21 +156,21 @@ def search():
             st.link_button("Verify with the official service","https://services.parivahan.gov.in/ntr/#/knowurdetails/login")
 
 def hub():
-    title("Service hub","Clear handoffs to official services. SafeDrive does not change government records.")
+    context_bar("Service hub");title("Service hub","Clear handoffs to official services. SafeDrive does not change government records.")
     a,b,c=st.columns(3)
     with a: st.subheader("Vehicle services");st.link_button("Know vehicle details","https://services.parivahan.gov.in/ntr/#/knowurdetails/login",use_container_width=True);st.link_button("Vehicle-related services","https://parivahan.gov.in/en/content/vehicle-related-services",use_container_width=True)
     with b: st.subheader("Licence services");st.link_button("Know licence details","https://services.parivahan.gov.in/ntr/#/knowurdetails/login",use_container_width=True);st.link_button("Driving licence services","https://sarathi.parivahan.gov.in/sarathiservice/stateSelection.do",use_container_width=True)
     with c: st.subheader("Mobile number updates");st.link_button("Update Vahan mobile number","https://vahan.parivahan.gov.in/mobileupdate/",use_container_width=True);st.link_button("Update Sarathi mobile number","https://sarathi.parivahan.gov.in/sarathiservice/mobNumUpdpub.do",use_container_width=True)
 
 def access():
-    p=me();title("Secure access","Trusted-device preference and retry support for failed access.")
+    p=me();context_bar("Secure access");title("Secure access","Trusted-device preference and retry support for failed access.")
     if st.button("Save trusted-device preference"):run("UPDATE state SET trusted=1 WHERE phone=?",(p,));st.success("Preference saved.")
     if st.button("Save current task and retry later"):run("INSERT INTO retries(phone,task,saved) VALUES(?,?,?)",(p,"OTP verification or account access","Just now"));st.success("Saved.")
     rows=all_rows("SELECT task,saved FROM retries WHERE phone=? ORDER BY id DESC",(p,))
     if rows:st.dataframe(rows,hide_index=True,use_container_width=True)
 
 def support():
-    p=me();title("Support centre","Every ticket retains its description and status.");rows=all_rows("SELECT * FROM tickets WHERE phone=? ORDER BY rowid DESC",(p,))
+    p=me();context_bar("Support centre");title("Support centre","Every ticket retains its description and status.");rows=all_rows("SELECT * FROM tickets WHERE phone=? ORDER BY rowid DESC",(p,))
     if not rows:st.info("No support requests yet.")
     for t in rows:
         with st.container(border=True):
@@ -168,7 +180,20 @@ def support():
         if not detail.strip():st.error("Describe the issue so support can act on it.")
         else:st.success(f"Request {ticket(p,subject,detail)} created.");st.rerun()
 
-PAGES={"Dashboard":dashboard,"Document vault":vault,"Recover documents":recovery,"Vehicle search":search,"Service hub":hub,"Secure access":access,"Support centre":support}
+def challan():
+    context_bar("Challan check")
+    title("Challan check", "A clear simulated status check with an official verification handoff.")
+    st.info("This screen uses simulated data only. It never retrieves or pays an official challan.")
+    value=number(st.text_input("Vehicle registration number or challan number",placeholder="e.g. DL01AB1234"))
+    if st.button("Check challan status",type="primary"):
+        if not re.fullmatch(r"[A-Z0-9-]{6,20}",value):
+            st.error("Enter a valid vehicle registration or challan number.")
+        else:
+            st.success(f"No simulated pending challans found for {value}.")
+            st.dataframe([{"Reference":value,"Status":"No simulated dues","Last checked":datetime.now().strftime("%d %b %Y, %I:%M %p")}],hide_index=True,use_container_width=True)
+            st.link_button("Verify on official eChallan", "https://echallan.parivahan.gov.in/")
+
+PAGES={"Dashboard":dashboard,"Document vault":vault,"Recover documents":recovery,"Vehicle search":search,"Challan check":challan,"Service hub":hub,"Secure access":access,"Support centre":support}
 if not st.session_state.logged:login()
 else:
     if not one("SELECT phone FROM users WHERE phone=?",(me(),)):st.session_state.logged,st.session_state.user=False,None;st.error("Session is no longer valid.");st.stop()

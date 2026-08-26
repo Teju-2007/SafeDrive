@@ -7,7 +7,7 @@ A Streamlit hackathon prototype addressing document loss, OTP friction, opaque r
 - Registered user mobile: 9876543210
 - Demo OTP: 123456
 
-You can also create an account with any 10-digit mobile number. The same demo OTP (123456) completes verification. Accounts only exist for the current browser session.
+You can also create an account with any 10-digit mobile number. The same demo OTP (123456) completes verification. Accounts, documents, tickets, and search usage persist locally in safedrive_demo.db; this remains simulated hackathon data, not a government system.
 
 ## Run locally
 
