@@ -2,22 +2,39 @@
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-import re, sqlite3, time, uuid
+import hashlib, hmac, os, re, secrets, sqlite3, time, uuid
 import qrcode
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config("SafeDrive | mParivahan companion", "🛡️", layout="wide")
 DB = Path(__file__).with_name("safedrive_demo.db")
-LIMIT, OTP, OTP_LIFETIME, OTP_COOLDOWN, MAX_ATTEMPTS = 10, "123456", 300, 30, 3
+LIMIT, OTP_LIFETIME, OTP_COOLDOWN, MAX_ATTEMPTS = 10, 300, 30, 3
 
 def conn():
-    c = sqlite3.connect(DB); c.row_factory = sqlite3.Row; return c
+    c = sqlite3.connect(DB, timeout=5)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA foreign_keys = ON")
+    c.execute("PRAGMA busy_timeout = 5000")
+    return c
 def run(sql, args=()):
-    with conn() as c: c.execute(sql,args); c.commit()
+    c = conn()
+    try:
+        c.execute(sql,args); c.commit()
+    finally:
+        c.close()
 def one(sql,args=()):
-    with conn() as c: return c.execute(sql,args).fetchone()
+    c = conn()
+    try:
+        return c.execute(sql,args).fetchone()
+    finally:
+        c.close()
 def all_rows(sql,args=()):
-    with conn() as c: return c.execute(sql,args).fetchall()
+    c = conn()
+    try:
+        return c.execute(sql,args).fetchall()
+    finally:
+        c.close()
 def mobile(v): return "".join(x for x in v if x.isdigit())
 def number(v): return v.replace(" ","").upper()
 def me(): return st.session_state.user
@@ -27,12 +44,15 @@ def context_bar(page):
     st.caption(f"SafeDrive / {page}")
 
 def init_db():
-    with conn() as c:
+    c = conn()
+    try:
         c.executescript("""CREATE TABLE IF NOT EXISTS users(phone TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS state(phone TEXT PRIMARY KEY,searches INTEGER NOT NULL DEFAULT 0,usage_date TEXT NOT NULL,trusted INTEGER NOT NULL DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS docs(id INTEGER PRIMARY KEY AUTOINCREMENT,phone TEXT NOT NULL,kind TEXT NOT NULL,num TEXT NOT NULL,status TEXT NOT NULL,updated TEXT NOT NULL,UNIQUE(phone,kind,num));
-        CREATE TABLE IF NOT EXISTS tickets(id TEXT PRIMARY KEY,phone TEXT NOT NULL,subject TEXT NOT NULL,detail TEXT NOT NULL,status TEXT NOT NULL,updated TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS retries(id INTEGER PRIMARY KEY AUTOINCREMENT,phone TEXT NOT NULL,task TEXT NOT NULL,saved TEXT NOT NULL);""")
+        CREATE TABLE IF NOT EXISTS state(phone TEXT PRIMARY KEY REFERENCES users(phone) ON DELETE CASCADE,searches INTEGER NOT NULL DEFAULT 0,usage_date TEXT NOT NULL,trusted INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS docs(id INTEGER PRIMARY KEY AUTOINCREMENT,phone TEXT NOT NULL REFERENCES users(phone) ON DELETE CASCADE,kind TEXT NOT NULL,num TEXT NOT NULL,status TEXT NOT NULL,updated TEXT NOT NULL,UNIQUE(phone,kind,num));
+        CREATE TABLE IF NOT EXISTS tickets(id TEXT PRIMARY KEY,phone TEXT NOT NULL REFERENCES users(phone) ON DELETE CASCADE,subject TEXT NOT NULL,detail TEXT NOT NULL,status TEXT NOT NULL,updated TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS retries(id INTEGER PRIMARY KEY AUTOINCREMENT,phone TEXT NOT NULL REFERENCES users(phone) ON DELETE CASCADE,task TEXT NOT NULL,saved TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS ticket_history(id INTEGER PRIMARY KEY AUTOINCREMENT,ticket_id TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,status TEXT NOT NULL,changed_at TEXT NOT NULL,note TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS search_cache(phone TEXT NOT NULL REFERENCES users(phone) ON DELETE CASCADE,registration TEXT NOT NULL,result_json TEXT NOT NULL,cached_on TEXT NOT NULL,PRIMARY KEY(phone,registration));""")
         now,today=datetime.now().isoformat(timespec="seconds"),datetime.now().date().isoformat()
         c.execute("INSERT OR IGNORE INTO users VALUES(?,?,?)",("9876543210","Aarav Sharma",now))
         c.execute("INSERT OR IGNORE INTO state VALUES(?,?,?,?)",("9876543210",1,today,1))
@@ -40,18 +60,67 @@ def init_db():
             c.executemany("INSERT INTO docs(phone,kind,num,status,updated) VALUES(?,?,?,?,?)",[("9876543210","Registration Certificate","DL01AB1234","Synced","Today, 10:42 AM"),("9876543210","Driving Licence","DL-0420110123456","Synced","Today, 10:39 AM")])
         if not c.execute("SELECT 1 FROM tickets WHERE phone=?",("9876543210",)).fetchone():
             c.executemany("INSERT INTO tickets VALUES(?,?,?,?,?,?)",[("SD-1024","9876543210","Vehicle record was missing","Demo issue for the hackathon walkthrough.","In review","18 minutes ago"),("SD-1017","9876543210","OTP did not arrive","Demo issue for the hackathon walkthrough.","Resolved","Yesterday")])
+        for row in c.execute("SELECT id,status,updated FROM tickets").fetchall():
+            c.execute("INSERT OR IGNORE INTO ticket_history(ticket_id,status,changed_at,note) SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM ticket_history WHERE ticket_id=?)",(row["id"],row["status"],row["updated"],"Ticket created or migrated.",row["id"]))
         c.commit()
+    finally:
+        c.close()
 def init_session():
-    for k,v in {"logged":False,"user":None,"page":"Dashboard","step":"choose","pending":None,"attempts":0,"expires":0.0,"resend":0.0}.items(): st.session_state.setdefault(k,v)
-def start_otp(phone):
+    for k,v in {"logged":False,"user":None,"page":"Dashboard","step":"choose","pending":None,"attempts":0,"expires":0.0,"resend":0.0,"otp_display":"","otp_hash":"","otp_challenge":"","otp_notice":"","last_triage":""}.items(): st.session_state.setdefault(k,v)
+def new_otp():
+    previous = st.session_state.get("otp_display", "")
+    code = previous
+    while code == previous:
+        code = f"{secrets.randbelow(1_000_000):06d}"
+    return code
+def start_otp(phone, notice=""):
     st.session_state.pending,st.session_state.step=phone,"otp"; st.session_state.attempts=0
     st.session_state.expires=time.time()+OTP_LIFETIME; st.session_state.resend=time.time()+OTP_COOLDOWN
+    code, challenge = new_otp(), secrets.token_urlsafe(24)
+    st.session_state.otp_display=code
+    st.session_state.otp_challenge=challenge
+    st.session_state.otp_hash=hashlib.sha256(f"{challenge}:{code}".encode()).hexdigest()
+    st.session_state.otp_notice=notice
+def otp_matches(code):
+    candidate = hashlib.sha256(f"{st.session_state.otp_challenge}:{code}".encode()).hexdigest()
+    return bool(st.session_state.otp_hash) and hmac.compare_digest(candidate, st.session_state.otp_hash)
+def valid_mobile(raw):
+    return bool(re.fullmatch(r"[6-9][0-9]{9}", raw))
+def valid_name(name):
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,79}", name.strip()))
+VEHICLE_RE = re.compile(r"[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}")
 def quota(phone):
     s,today=one("SELECT * FROM state WHERE phone=?",(phone,)),datetime.now().date().isoformat()
     if s["usage_date"]!=today: run("UPDATE state SET searches=0,usage_date=? WHERE phone=?",(today,phone)); return 0
     return s["searches"]
 def ticket(phone,subject,detail):
-    ident="SD-"+uuid.uuid4().hex[:6].upper(); run("INSERT INTO tickets VALUES(?,?,?,?,?,?)",(ident,phone,subject,detail.strip(),"New","Just now")); return ident
+    if not one("SELECT phone FROM users WHERE phone=?", (phone,)):
+        raise ValueError("Cannot create a ticket for an unknown account.")
+    for _ in range(5):
+        ident="SD-"+uuid.uuid4().hex.upper()
+        try:
+            run("INSERT INTO tickets VALUES(?,?,?,?,?,?)",(ident,phone,subject,detail.strip(),"New","Just now"))
+            run("INSERT INTO ticket_history(ticket_id,status,changed_at,note) VALUES(?,?,?,?)",(ident,"New","Just now","Ticket created."))
+            return ident
+        except sqlite3.IntegrityError:
+            continue
+    raise RuntimeError("Could not generate a unique ticket ID.")
+
+def triage_ticket(subject, detail):
+    fallback = f"Suggested route: {subject}. Priority: Normal. Next step: review the description and create a support ticket."
+    if not os.getenv("OPENAI_API_KEY"):
+        return fallback + " (Local fallback - add OPENAI_API_KEY to enable OpenAI triage.)"
+    try:
+        from openai import OpenAI
+        response = OpenAI().responses.create(
+            model=os.getenv("SAFEDRIVE_OPENAI_MODEL","gpt-5-mini"),
+            store=False,
+            instructions="You triage a mock public-service support issue. Give a concise, plain-language route, priority (Low, Normal, High), and next step. Do not invent official facts.",
+            input=f"Subject: {subject}\nDescription: {detail[:1000]}",
+        )
+        return response.output_text.strip()
+    except Exception:
+        return fallback + " (AI triage was unavailable; local fallback shown.)"
 
 init_db(); init_session()
 st.markdown("""<style>.stApp{background:#f6f8fc}[data-testid="stSidebar"]{background:#0b1f3a}[data-testid="stSidebar"] *{color:#eef5ff!important}.hero{background:linear-gradient(120deg,#0c3266,#0b7a75);padding:2rem;border-radius:20px;color:white;margin-bottom:1.4rem}.card{background:#fff;border:1px solid #e5eaf2;border-radius:16px;padding:1rem;min-height:100px}.metric{font-size:1.7rem;font-weight:700;color:#102a50}.pill{padding:.18rem .58rem;border-radius:999px;background:#e5f6ee;color:#137a4d;font-size:.8rem}</style>""",unsafe_allow_html=True)
@@ -60,42 +129,57 @@ def login():
     st.markdown('<div class="hero"><h1>SafeDrive</h1><p>A safer, more reliable way to access transport documents.</p></div>',unsafe_allow_html=True)
     st.caption("Hackathon demo only. No real mParivahan account, document, SMS, or government data is used.")
     if st.session_state.step=="otp":
+        expired=time.time()>=st.session_state.expires
+        if expired:
+            start_otp(st.session_state.pending, "Your previous OTP expired. A new demo OTP was generated.")
+        st_autorefresh(interval=1000, key="otp_countdown")
         left=max(0,int(st.session_state.expires-time.time())); cooldown=max(0,int(st.session_state.resend-time.time())); locked=st.session_state.attempts>=MAX_ATTEMPTS
         title("Verify your mobile number",f"OTP sent to +91 ••••••{st.session_state.pending[-4:]}")
         st.caption(f"OTP is valid for {left//60}:{left%60:02d}.")
+        if st.session_state.otp_notice:
+            st.success(st.session_state.otp_notice)
+            st.session_state.otp_notice=""
         with st.expander("Hackathon demo shortcut"):
-            st.code(f"Demo OTP: {OTP}", language=None)
-            st.caption("This shortcut exists only for the prototype. Production uses a unique OTP sent through an approved SMS provider.")
+            st.code(f"Current demo OTP: {st.session_state.otp_display}", language=None)
+            st.caption("A new random six-digit OTP is generated for every challenge, resend and expiry. Production uses a unique OTP sent through an approved SMS provider.")
         if locked: st.error("Too many incorrect attempts. Resend an OTP to start a new challenge.")
         code=st.text_input("Enter the 6-digit OTP",max_chars=6,type="password")
         a,b=st.columns(2)
         with a:
             if st.button("Verify and continue",type="primary",use_container_width=True,disabled=locked):
-                if time.time()>st.session_state.expires: st.error("This OTP expired. Resend a new OTP.")
-                elif code==OTP: st.session_state.logged,st.session_state.user,st.session_state.step=True,st.session_state.pending,"choose"; st.rerun()
+                if expired: st.warning("The previous OTP expired and has been replaced. Enter the new OTP shown in the demo shortcut.")
+                elif otp_matches(code):
+                    st.session_state.logged,st.session_state.user,st.session_state.step=True,st.session_state.pending,"choose"
+                    st.session_state.otp_display=st.session_state.otp_hash=st.session_state.otp_challenge=""
+                    st.rerun()
                 else:
                     st.session_state.attempts+=1; remaining=MAX_ATTEMPTS-st.session_state.attempts
                     st.error("Too many incorrect attempts. Resend an OTP." if remaining<=0 else f"Incorrect OTP. {remaining} attempt(s) remaining.")
         with b:
-            if st.button("Resend OTP",use_container_width=True,disabled=cooldown>0): start_otp(st.session_state.pending); st.rerun()
+            if st.button("Resend OTP",use_container_width=True,disabled=cooldown>0): start_otp(st.session_state.pending, "A new random demo OTP was generated."); st.rerun()
         if cooldown:
             st.caption(f"You can resend in {cooldown} seconds.")
-            if st.button("Refresh OTP timer"):
-                st.rerun()
         if st.button("Use a different mobile number"): st.session_state.step,st.session_state.pending="choose",None; st.rerun()
         return
     a,b=st.tabs(["Log in","Create account"])
     with a:
-        with st.form("login_form"): p,sent=mobile(st.text_input("Registered mobile number",placeholder="9876543210")),st.form_submit_button("Send OTP")
+        with st.form("login_form"):
+            raw_phone=st.text_input("Registered mobile number",placeholder="9876543210")
+            p,sent=mobile(raw_phone),st.form_submit_button("Send OTP")
         if sent:
-            if len(p)!=10: st.error("Enter a valid 10-digit mobile number.")
+            if not valid_mobile(raw_phone): st.error("Enter a valid 10-digit Indian mobile number.")
             elif not one("SELECT phone FROM users WHERE phone=?",(p,)): st.warning("No account found. Create one first.")
             else: start_otp(p); st.rerun()
     with b:
         with st.form("signup_form"):
-            name=st.text_input("Full name"); p=mobile(st.text_input("Mobile number",placeholder="9876543210")); ok=st.checkbox("I agree to receive a demo verification OTP."); sent=st.form_submit_button("Create account and send OTP")
+            name=st.text_input("Full name",max_chars=80)
+            raw_phone=st.text_input("Mobile number",placeholder="9876543210")
+            p=mobile(raw_phone)
+            ok=st.checkbox("I agree to receive a demo verification OTP.")
+            st.caption("Demo safety: do not enter a real government ID, RC/DL, payment detail or sensitive personal information.")
+            sent=st.form_submit_button("Create account and send OTP")
         if sent:
-            if not name.strip() or len(p)!=10: st.error("Enter your name and a valid 10-digit mobile number.")
+            if not valid_name(name) or not valid_mobile(raw_phone): st.error("Enter a valid name and a 10-digit Indian mobile number.")
             elif not ok: st.error("Please confirm OTP consent.")
             elif one("SELECT phone FROM users WHERE phone=?",(p,)): st.warning("An account already exists. Log in instead.")
             else:
@@ -147,11 +231,19 @@ def search():
     p,used=me(),quota(me());remaining=LIMIT-used;context_bar("Vehicle search");title("Vehicle search","A transparent quota that resets automatically each calendar day.");st.progress(used/LIMIT,text=f"{remaining} of {LIMIT} standard searches remain today")
     vehicle=number(st.text_input("Vehicle registration number",placeholder="e.g. DL01AB1234"))
     if st.button("Search vehicle",type="primary"):
-        if not re.fullmatch(r"[A-Z0-9-]{6,15}",vehicle): st.error("Enter a valid vehicle registration number.")
-        elif remaining==0: st.warning("Today's standard limit is reached. It resets automatically at midnight.")
+        if not VEHICLE_RE.fullmatch(vehicle): st.error("Enter a valid vehicle registration number, e.g. DL01AB1234.")
         else:
-            run("UPDATE state SET searches=searches+1 WHERE phone=?",(p,));saved=one("SELECT id FROM docs WHERE phone=? AND num=?",(p,vehicle))
-            st.success(f"Demo lookup complete for {vehicle}. This was search {used+1} of {LIMIT}.")
+            cached=one("SELECT result_json,cached_on FROM search_cache WHERE phone=? AND registration=?",(p,vehicle))
+            if cached:
+                st.success(f"Demo lookup loaded from your saved result for {vehicle}. It did not use another daily search.")
+            elif remaining==0:
+                st.warning("Today's standard limit is reached. It resets automatically at midnight.")
+                return
+            else:
+                run("UPDATE state SET searches=searches+1 WHERE phone=?",(p,))
+                run("INSERT INTO search_cache(phone,registration,result_json,cached_on) VALUES(?,?,?,?)",(p,vehicle,"synthetic vehicle record",datetime.now().isoformat(timespec="seconds")))
+                st.success(f"Demo lookup complete for {vehicle}. This was search {used+1} of {LIMIT}.")
+            saved=one("SELECT id FROM docs WHERE phone=? AND num=?",(p,vehicle))
             st.dataframe([{"Registration":vehicle,"Owner":"Protected — official verification required","Registration date":"Demo data","Registering authority":"Demo RTO","Make / model":"Demo vehicle","Fuel type":"Demo data","Insurance validity":"Verify officially","Vault match":"Saved in your vault" if saved else "Not in your vault"}],hide_index=True,use_container_width=True)
             st.link_button("Verify with the official service","https://services.parivahan.gov.in/ntr/#/knowurdetails/login")
 
@@ -171,14 +263,24 @@ def access():
 
 def support():
     p=me();context_bar("Support centre");title("Support centre","Every ticket retains its description and status.");rows=all_rows("SELECT * FROM tickets WHERE phone=? ORDER BY rowid DESC",(p,))
+    st.caption("Demo safety: do not include government IDs, payment data, passwords, OTPs or other sensitive personal information.")
     if not rows:st.info("No support requests yet.")
     for t in rows:
         with st.container(border=True):
             a,b,c=st.columns([1,3,1]);a.markdown(f"**{t['id']}**");b.markdown(f"**{t['subject']}**  \n{t['detail']}  \nUpdated {t['updated']}");c.write(t["status"])
+            history=all_rows("SELECT status,changed_at,note FROM ticket_history WHERE ticket_id=? ORDER BY id DESC",(t["id"],))
+            if history:
+                with st.expander("Status history"):
+                    st.dataframe(history,hide_index=True,use_container_width=True)
     with st.form("ticket"):subject=st.selectbox("What do you need help with?",["Missing document","OTP or login","Vehicle search","Unexpected error","Other"]);detail=st.text_area("Briefly describe what happened",max_chars=1000);submitted=st.form_submit_button("Create request")
     if submitted:
         if not detail.strip():st.error("Describe the issue so support can act on it.")
-        else:st.success(f"Request {ticket(p,subject,detail)} created.");st.rerun()
+        else:
+            st.session_state.last_triage=triage_ticket(subject,detail)
+            st.success(f"Request {ticket(p,subject,detail)} created.")
+            st.rerun()
+    if st.session_state.last_triage:
+        st.info(f"AI support triage: {st.session_state.last_triage}")
 
 def challan():
     context_bar("Challan check")
