@@ -5,9 +5,13 @@ A Streamlit hackathon prototype addressing document loss, OTP friction, opaque r
 ## Demo login
 
 - Registered user mobile: 9876543210
-- Demo OTP: 123456
+- Demo OTP: generated randomly for each login challenge; open the in-app “Hackathon demo shortcut” during testing.
 
-You can also create an account with any 10-digit mobile number. The same demo OTP (123456) completes verification. Accounts, documents, tickets, and search usage persist locally in safedrive_demo.db; this remains simulated hackathon data, not a government system.
+You can also create an account with any valid 10-digit Indian mobile number. A new random six-digit demo OTP is generated for every login, resend, and expiry. Accounts, documents, tickets, and search usage persist locally in safedrive_demo.db; this remains simulated hackathon data, not a government system.
+
+## Optional OpenAI support triage
+
+SafeDrive can use the OpenAI Responses API to draft a plain-language support route and priority. Set OPENAI_API_KEY before running the app to enable it; otherwise the app shows a clearly labelled local fallback. No API call is made unless the key is present.
 
 ## Run locally
 
