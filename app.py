@@ -7,7 +7,7 @@ import qrcode
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config("SafeDrive | mParivahan companion", "🛡️", layout="wide")
+st.set_page_config("SafeDrive | Mobility services companion", "🛡️", layout="wide")
 DB = Path(__file__).with_name("safedrive_demo.db")
 LIMIT, OTP_LIFETIME, OTP_COOLDOWN, MAX_ATTEMPTS = 10, 300, 30, 3
 
@@ -127,7 +127,7 @@ st.markdown("""<style>.stApp{background:#f6f8fc}[data-testid="stSidebar"]{backgr
 
 def login():
     st.markdown('<div class="hero"><h1>SafeDrive</h1><p>A safer, more reliable way to access transport documents.</p></div>',unsafe_allow_html=True)
-    st.caption("Hackathon demo only. No real mParivahan account, document, SMS, or government data is used.")
+    st.caption("Hackathon demo only. No real government account, document, SMS, or government data is used.")
     if st.session_state.step=="otp":
         expired=time.time()>=st.session_state.expires
         if expired:
@@ -300,7 +300,7 @@ if not st.session_state.logged:login()
 else:
     if not one("SELECT phone FROM users WHERE phone=?",(me(),)):st.session_state.logged,st.session_state.user=False,None;st.error("Session is no longer valid.");st.stop()
     with st.sidebar:
-        st.markdown("# 🛡️ SafeDrive");st.caption("mParivahan reliability companion");st.write(f"Signed in as **{person()['name']}**")
+        st.markdown("# 🛡️ SafeDrive");st.caption("A companion for mobility services");st.write(f"Signed in as **{person()['name']}**")
         page=st.session_state.page if st.session_state.page in PAGES else "Dashboard";st.session_state.page=st.radio("Navigate",list(PAGES),index=list(PAGES).index(page))
         if st.button("Log out",use_container_width=True):st.session_state.logged,st.session_state.user,st.session_state.step,st.session_state.pending=False,None,"choose",None;st.rerun()
         st.caption("Hackathon prototype · Uses local simulated data only")

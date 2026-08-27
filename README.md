@@ -1,4 +1,4 @@
-# SafeDrive — mParivahan reliability companion
+# SafeDrive — a companion for mobility services
 
 A Streamlit hackathon prototype addressing document loss, OTP friction, opaque rate limits, transaction failures, and support visibility. It now includes account-scoped virtual document passes with demo QR verification and transparent official-service handoffs. All content is simulated; it does not access government systems or personal data.
 
